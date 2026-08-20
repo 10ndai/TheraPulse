@@ -1,0 +1,161 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+# Cancel any in-flight run for the same branch when a new push arrives
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: '20.x'
+
+jobs:
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Lint — ESLint across all workspaces + Prettier format check
+  # ─────────────────────────────────────────────────────────────────────────────
+  lint:
+    name: Lint & Format
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        # --legacy-peer-deps: typescript-eslint v8 declares peer typescript <6.0.0
+        # but works at runtime with TypeScript 6. Remove when typescript-eslint
+        # officially supports TypeScript 6.
+        run: npm ci --legacy-peer-deps
+
+      - name: ESLint
+        run: npm run lint
+
+      - name: Prettier format check
+        run: npm run format:check
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Test — Vitest unit tests + coverage upload
+  # ─────────────────────────────────────────────────────────────────────────────
+  test:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci --legacy-peer-deps
+
+      - name: Run tests
+        run: npm test
+
+      - name: Upload coverage reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-reports
+          path: |
+            apps/api/coverage/
+            apps/web/coverage/
+            packages/shared/coverage/
+          if-no-files-found: ignore
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Build — verify all workspaces compile cleanly
+  # ─────────────────────────────────────────────────────────────────────────────
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci --legacy-peer-deps
+
+      - name: Build all packages
+        run: npm run build
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Security — npm audit + Semgrep SAST
+  # ─────────────────────────────────────────────────────────────────────────────
+  audit:
+    name: npm Audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci --legacy-peer-deps
+
+      - name: Run security audit (production deps only)
+        # --omit=dev: only audit production dependencies
+        # --audit-level=critical: fail on CRITICAL severity only
+        # Known HIGH vulns (path-to-regexp via @nestjs/core v11): tracked, no fix
+        # available without downgrading to NestJS 10 (breaking change).
+        # Raise to --audit-level=high once NestJS 11 ships a patched release.
+        run: npm audit --omit=dev --audit-level=critical
+
+  semgrep:
+    name: Semgrep SAST
+    runs-on: ubuntu-latest
+    # Skip on Dependabot PRs — it cannot access secrets
+    if: github.actor != 'dependabot[bot]'
+    permissions:
+      security-events: write
+      actions: read
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Semgrep scan
+        uses: semgrep/semgrep-action@v1
+        with:
+          # Security rulesets — covers OWASP Top 10, TypeScript-specific issues,
+          # and general security anti-patterns
+          config: >-
+            p/security-audit
+            p/typescript
+            p/owasp-top-ten
+          generateSarif: '1'
+        env:
+          # Optional: connect to Semgrep Cloud Platform for dashboard + triage.
+          # Set SEMGREP_APP_TOKEN in repository secrets to enable.
+          SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
+
+      - name: Upload SARIF to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: semgrep.sarif
+        continue-on-error: true

@@ -1,0 +1,449 @@
+// TheraPulse — Prisma Schema
+// TP-005: Database schema design + Prisma setup
+//
+// Security notes:
+// - All fields marked "encrypted" hold AES-256-GCM ciphertext (app layer, TP-010).
+//   Encrypted values are typed String regardless of their logical type.
+// - Scores on worksheet_submissions are NOT encrypted — they are derived aggregates
+//   needed for progress dashboard queries. RLS restricts who can see them.
+// - worksheet_submissions is IMMUTABLE after finalized_at is set (DB trigger in migration).
+// - audit_logs is APPEND-ONLY (DB rule in migration blocks UPDATE/DELETE).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ENUMS
+// ─────────────────────────────────────────────────────────────────────────────
+
+enum UserRole {
+  ADMIN
+  THERAPIST
+  CLIENT
+}
+
+enum UserStatus {
+  ACTIVE
+  PENDING // therapist registered, awaiting approval
+  SUSPENDED
+  DELETED // soft-deleted; hard-delete via scheduled job after 30 days
+}
+
+enum ApprovalStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum RelationshipStatus {
+  ACTIVE
+  PAUSED
+  TERMINATED
+}
+
+enum WorksheetType {
+  PHQ9
+  GAD7
+  MOOD_TRACKING
+  CBT_THOUGHT_RECORD
+  GOAL_SETTING
+  CUSTOM
+}
+
+enum AssignmentStatus {
+  PENDING
+  IN_PROGRESS
+  COMPLETED
+  OVERDUE
+}
+
+enum NoteStatus {
+  DRAFT
+  FINALIZED
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// users
+// ─────────────────────────────────────────────────────────────────────────────
+
+model User {
+  id           String     @id @default(uuid()) @db.Uuid
+  email        String     @unique
+  passwordHash String     @map("password_hash")
+  role         UserRole
+  status       UserStatus @default(ACTIVE)
+
+  // Encrypted: AES-256-GCM ciphertext. NULL until TOTP setup (TP-014).
+  totpSecret  String? @map("totp_secret")
+  totpEnabled Boolean @default(false) @map("totp_enabled")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  // ── Relations ──────────────────────────────────────────────────────────────
+  therapistProfile TherapistProfile?
+  clientProfile    ClientProfile?
+  approvedProfiles TherapistProfile[]   @relation("ApprovedBy")
+
+  therapistRelationships TherapistClient[] @relation("TherapistInRelationship")
+  clientRelationships    TherapistClient[] @relation("ClientInRelationship")
+
+  createdTemplates     WorksheetTemplate[]   @relation("TemplateCreator")
+  therapistAssignments WorksheetAssignment[] @relation("AssignmentTherapist")
+  clientAssignments    WorksheetAssignment[] @relation("AssignmentClient")
+  clientSubmissions    WorksheetSubmission[]
+
+  therapistNotes     SessionNote[]        @relation("NoteTherapist")
+  clientNotes        SessionNote[]        @relation("NoteClient")
+  noteVersionChanges SessionNoteVersion[]
+
+  auditLogs       AuditLog[]
+  refreshTokens   RefreshToken[]
+  totpBackupCodes TotpBackupCode[]
+  notifications   Notification[]
+
+  @@index([email])
+  @@index([role, status])
+  @@map("users")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// therapist_profiles
+// ─────────────────────────────────────────────────────────────────────────────
+
+model TherapistProfile {
+  id     String @id @default(uuid()) @db.Uuid
+  userId String @unique @map("user_id") @db.Uuid
+
+  name            String
+  bio             String?
+  // PostgreSQL TEXT[] — GIN indexes added via raw SQL in migration
+  specializations String[]
+  qualifications  String[]
+  licenseNumber   String?  @map("license_number")
+  languages       String[]
+  city            String?
+  province        String?
+
+  // Encrypted: AES-256-GCM ciphertext
+  phone String?
+
+  approvalStatus ApprovalStatus @default(PENDING) @map("approval_status")
+  approvedById   String?        @map("approved_by_id") @db.Uuid
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  user     User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  approver User? @relation("ApprovedBy", fields: [approvedById], references: [id], onDelete: SetNull)
+
+  @@index([approvalStatus])
+  @@index([city, province])
+  // GIN indexes (raw SQL in migration):
+  //   CREATE INDEX idx_therapist_specializations ON therapist_profiles USING GIN (specializations);
+  //   CREATE INDEX idx_therapist_languages ON therapist_profiles USING GIN (languages);
+  @@map("therapist_profiles")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// client_profiles
+// ─────────────────────────────────────────────────────────────────────────────
+
+model ClientProfile {
+  id     String @id @default(uuid()) @db.Uuid
+  userId String @unique @map("user_id") @db.Uuid
+
+  name     String
+  city     String?
+  province String?
+
+  // Encrypted: logical type is ISO-8601 date string
+  dateOfBirth String? @map("date_of_birth")
+  // Encrypted: phone number string
+  phone String?
+  // Encrypted: JSON { name, relationship, phone, email }
+  emergencyContact String? @map("emergency_contact")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("client_profiles")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// therapist_clients
+// ─────────────────────────────────────────────────────────────────────────────
+
+model TherapistClient {
+  id          String             @id @default(uuid()) @db.Uuid
+  therapistId String             @map("therapist_id") @db.Uuid
+  clientId    String             @map("client_id") @db.Uuid
+  status      RelationshipStatus @default(ACTIVE)
+  // When the therapeutic relationship began (used in timeline view TP-052)
+  startedAt   DateTime           @default(now()) @map("started_at") @db.Timestamptz
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  therapist User @relation("TherapistInRelationship", fields: [therapistId], references: [id], onDelete: Cascade)
+  client    User @relation("ClientInRelationship", fields: [clientId], references: [id], onDelete: Cascade)
+
+  @@unique([therapistId, clientId])
+  @@index([therapistId, status])
+  @@index([clientId, status])
+  @@map("therapist_clients")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// worksheet_templates
+// ─────────────────────────────────────────────────────────────────────────────
+
+model WorksheetTemplate {
+  id    String        @id @default(uuid()) @db.Uuid
+  title String
+  type  WorksheetType
+
+  // "formSchema" avoids the Prisma reserved-word collision with "schema".
+  // The PostgreSQL column is still named "schema" via @map.
+  formSchema    Json  @map("schema")
+  scoringConfig Json? @map("scoring_config")
+
+  isSystem    Boolean @default(false) @map("is_system")
+  createdById String? @map("created_by_id") @db.Uuid
+
+  isPublished Boolean @default(false) @map("is_published")
+  // Increments only on publish, not on every draft save.
+  version     Int     @default(1)
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  createdBy   User?                 @relation("TemplateCreator", fields: [createdById], references: [id], onDelete: SetNull)
+  assignments WorksheetAssignment[]
+
+  @@index([type, isPublished])
+  @@index([isSystem, isPublished])
+  @@map("worksheet_templates")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// worksheet_assignments
+// ─────────────────────────────────────────────────────────────────────────────
+
+model WorksheetAssignment {
+  id          String           @id @default(uuid()) @db.Uuid
+  templateId  String           @map("template_id") @db.Uuid
+  therapistId String           @map("therapist_id") @db.Uuid
+  clientId    String           @map("client_id") @db.Uuid
+  instructions String?
+  dueDate     DateTime?        @map("due_date") @db.Timestamptz
+  status      AssignmentStatus @default(PENDING)
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at") @db.Timestamptz
+
+  template    WorksheetTemplate     @relation(fields: [templateId], references: [id], onDelete: Restrict)
+  therapist   User                  @relation("AssignmentTherapist", fields: [therapistId], references: [id], onDelete: Cascade)
+  client      User                  @relation("AssignmentClient", fields: [clientId], references: [id], onDelete: Cascade)
+  submissions WorksheetSubmission[]
+
+  @@index([clientId, status])
+  @@index([therapistId, status])
+  @@index([dueDate, status])
+  @@index([deletedAt])
+  @@map("worksheet_assignments")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// worksheet_submissions  (IMMUTABLE after finalized_at is set)
+// NO updatedAt — DB trigger blocks UPDATE once finalized_at IS NOT NULL.
+// ─────────────────────────────────────────────────────────────────────────────
+
+model WorksheetSubmission {
+  id           String @id @default(uuid()) @db.Uuid
+  assignmentId String @map("assignment_id") @db.Uuid
+  clientId     String @map("client_id") @db.Uuid
+
+  // Encrypted: AES-256-GCM ciphertext of JSON { fieldId: answer, ... }
+  responses String
+
+  // Plain JSONB — derived scores, not raw PHI. Needed for dashboard aggregation.
+  // { totalScore, severity, subscores }
+  score Json?
+
+  finalizedAt   DateTime? @map("finalized_at") @db.Timestamptz
+  // HMAC-SHA-512 over (id ∥ assignmentId ∥ clientId ∥ ciphertext)
+  // using INTEGRITY_HMAC_KEY env var. Verified by TP-039.
+  integrityHash String    @map("integrity_hash")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  // NO updatedAt — immutable after finalization
+
+  assignment WorksheetAssignment @relation(fields: [assignmentId], references: [id], onDelete: Cascade)
+  client     User                @relation(fields: [clientId], references: [id], onDelete: Cascade)
+
+  @@index([clientId, finalizedAt(sort: Desc)])
+  @@index([assignmentId, finalizedAt])
+  @@map("worksheet_submissions")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// session_notes
+// ─────────────────────────────────────────────────────────────────────────────
+
+model SessionNote {
+  id          String   @id @default(uuid()) @db.Uuid
+  therapistId String   @map("therapist_id") @db.Uuid
+  clientId    String   @map("client_id") @db.Uuid
+  sessionDate DateTime @map("session_date") @db.Timestamptz
+  // String (not enum) — new session types need no migration; validated by Zod
+  sessionType String   @map("session_type")
+
+  // Encrypted: AES-256-GCM ciphertext of SOAP note fields
+  subjective String?
+  objective  String?
+  assessment String?
+  plan       String?
+
+  status  NoteStatus @default(DRAFT)
+  version Int        @default(1)
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at") @db.Timestamptz
+
+  therapist User                 @relation("NoteTherapist", fields: [therapistId], references: [id], onDelete: Cascade)
+  client    User                 @relation("NoteClient", fields: [clientId], references: [id], onDelete: Cascade)
+  versions  SessionNoteVersion[]
+
+  @@index([therapistId, clientId, sessionDate(sort: Desc)])
+  @@index([clientId, sessionDate(sort: Desc)])
+  @@index([therapistId, status])
+  @@map("session_notes")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// session_note_versions  (write-once audit artifacts)
+// ─────────────────────────────────────────────────────────────────────────────
+
+model SessionNoteVersion {
+  id            String @id @default(uuid()) @db.Uuid
+  sessionNoteId String @map("session_note_id") @db.Uuid
+  version       Int
+  // Encrypted: AES-256-GCM ciphertext of JSON snapshot of all SOAP fields
+  contentSnapshot String @map("content_snapshot")
+  changedById     String @map("changed_by_id") @db.Uuid
+
+  createdAt DateTime @default(now()) @map("created_at")
+  // NO updatedAt — write-once
+
+  sessionNote SessionNote @relation(fields: [sessionNoteId], references: [id], onDelete: Cascade)
+  changedBy   User        @relation(fields: [changedById], references: [id], onDelete: Cascade)
+
+  @@unique([sessionNoteId, version])
+  @@index([sessionNoteId, version])
+  @@map("session_note_versions")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// audit_logs  (APPEND-ONLY — DB rule blocks UPDATE/DELETE)
+// ─────────────────────────────────────────────────────────────────────────────
+
+model AuditLog {
+  id           String  @id @default(uuid()) @db.Uuid
+  // Nullable: system-initiated actions have no human actor
+  actorId      String? @map("actor_id") @db.Uuid
+  // e.g. "user.login", "worksheet.submit", "note.finalize"
+  action       String
+  resourceType String  @map("resource_type")
+  resourceId   String? @map("resource_id")
+  // Non-sensitive context only: changed field names, counts — never field values
+  details      Json?
+  ipAddress    String  @map("ip_address")
+  userAgent    String  @map("user_agent")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  // NO updatedAt — append-only
+
+  // SetNull so audit records survive user hard-deletion
+  actor User? @relation(fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([actorId, createdAt(sort: Desc)])
+  @@index([resourceType, resourceId, createdAt(sort: Desc)])
+  @@index([createdAt(sort: Desc)])
+  @@index([action, createdAt(sort: Desc)])
+  @@map("audit_logs")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// refresh_tokens
+// ─────────────────────────────────────────────────────────────────────────────
+
+model RefreshToken {
+  id        String    @id @default(uuid()) @db.Uuid
+  userId    String    @map("user_id") @db.Uuid
+  // bcrypt hash of the raw token (never store raw tokens)
+  tokenHash String    @map("token_hash")
+  expiresAt DateTime  @map("expires_at") @db.Timestamptz
+  revokedAt DateTime? @map("revoked_at") @db.Timestamptz
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, revokedAt, expiresAt])
+  @@map("refresh_tokens")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// totp_backup_codes  (single-use; usedAt set on consumption)
+// ─────────────────────────────────────────────────────────────────────────────
+
+model TotpBackupCode {
+  id       String    @id @default(uuid()) @db.Uuid
+  userId   String    @map("user_id") @db.Uuid
+  // bcrypt hash of the plaintext code (never store codes in cleartext)
+  codeHash String    @map("code_hash")
+  usedAt   DateTime? @map("used_at") @db.Timestamptz
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, usedAt])
+  @@map("totp_backup_codes")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// notifications  (in-app, TP-040)
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Notification {
+  id           String    @id @default(uuid()) @db.Uuid
+  recipientId  String    @map("recipient_id") @db.Uuid
+  // e.g. 'NEW_ASSIGNMENT' | 'SUBMISSION_FEEDBACK'
+  type         String
+  title        String
+  body         String
+  resourceType String    @map("resource_type")
+  resourceId   String    @map("resource_id") @db.Uuid
+  readAt       DateTime? @map("read_at") @db.Timestamptz
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  recipient User @relation(fields: [recipientId], references: [id], onDelete: Cascade)
+
+  @@index([recipientId, readAt])
+  @@index([recipientId, createdAt(sort: Desc)])
+  @@map("notifications")
+}

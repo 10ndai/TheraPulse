@@ -1,0 +1,57 @@
+{
+  "name": "therapulse",
+  "version": "0.1.0",
+  "private": true,
+  "description": "TheraPulse mental health platform monorepo",
+  "packageManager": "npm@10.9.4",
+  "engines": {
+    "node": ">=20.9.0",
+    "npm": ">=10.0.0"
+  },
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "turbo dev",
+    "build": "turbo build",
+    "test": "turbo test",
+    "test:e2e": "turbo test:e2e",
+    "lint": "turbo lint",
+    "clean": "turbo clean",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "prepare": "husky || true"
+  },
+  "devDependencies": {
+    "@eslint/js": "9.18.0",
+    "@types/qrcode": "1.5.6",
+    "eslint": "9.18.0",
+    "eslint-config-prettier": "9.1.0",
+    "husky": "9.1.7",
+    "lint-staged": "15.3.0",
+    "prettier": "3.8.1",
+    "turbo": "2.8.20",
+    "typescript": "6.0.2",
+    "typescript-eslint": "8.20.0"
+  },
+  "lint-staged": {
+    "*.{ts,tsx,js,mjs,cjs}": [
+      "eslint --fix",
+      "prettier --write"
+    ],
+    "*.{json,md,yaml,yml,css}": [
+      "prettier --write"
+    ]
+  },
+  "overrides": {
+    "vite": "7.0.6"
+  },
+  "dependencies": {
+    "@nestjs/jwt": "11.0.2",
+    "@types/bcrypt": "6.0.0",
+    "bcrypt": "6.0.0",
+    "otplib": "13.4.0",
+    "qrcode": "1.5.4"
+  }
+}
