@@ -249,6 +249,44 @@ staged.
 
 ---
 
+## 9. Health endpoint returned 401 — found by actually running `npm run dev`
+
+`apps/api/src/app.controller.ts`
+
+`JwtAuthGuard` is registered globally via `APP_GUARD`, and `@Get('health')` was
+missing `@Public()`. A live probe against the running dev server:
+
+```
+GET http://localhost:3001/api/health
+{"success":false,"error":{"code":"UNAUTHORIZED","message":"Missing auth token"}}   HTTP 401
+```
+
+This is a deployment blocker, not a cosmetic issue. Two things require an
+unauthenticated `200` from that exact path:
+
+- `apps/api/Dockerfile` — `HEALTHCHECK ... wget -qO- http://localhost:3001/api/health`.
+  A permanently failing healthcheck means the orchestrator marks the container
+  unhealthy and restarts it forever.
+- `.github/workflows/deploy.yml` — the post-deploy gate fails the deployment
+  unless the status is exactly `200`.
+
+No test covered it, so the whole suite stayed green while the endpoint was
+unreachable.
+
+**Fix (TDD):** added a failing test asserting the handler carries `IS_PUBLIC_KEY`
+metadata, then added `@Public()` with a comment explaining why it must stay.
+Verified live against the running server:
+
+```
+GET http://localhost:3001/api/health
+{"status":"ok","timestamp":"2026-08-21T19:02:34.653Z"}   HTTP 200
+```
+
+Also smoke-tested the full stack end to end — web → BFF → API → Postgres returns
+seeded directory data (`HTTP 200`), and `/`, `/auth/login`, `/directory` all render.
+
+---
+
 ## Known issues (not fixed, nothing is blocked)
 
 1. **234 type errors in test files** — `apps/api` 194, `apps/web` 40; `packages/shared` is
@@ -269,5 +307,14 @@ staged.
    bump could raise the gate back to `--audit-level=high` — worth its own verification
    pass rather than folding into this one.
 
-3. **`package.json#prisma` config key is deprecated** and will be removed in Prisma 7 —
+3. **The web container's healthcheck can fail the same way, by configuration.**
+   `apps/web/src/app/api/health/route.ts` returns `500 CONFIG_ERROR` when `API_URL`
+   is unset — deliberate, and pinned by a test — but every one of the other 30 BFF
+   routes falls back to `http://localhost:3001`, and `apps/web/Dockerfile` never
+   sets `API_URL` while its `HEALTHCHECK` probes that route. So a web container
+   started without an explicit `API_URL` is permanently unhealthy. Left as-is
+   because the strict behaviour is intentional; the deployment must supply
+   `API_URL`, or the Dockerfile should default it.
+
+4. **`package.json#prisma` config key is deprecated** and will be removed in Prisma 7 —
    migrate to `prisma.config.ts`.
