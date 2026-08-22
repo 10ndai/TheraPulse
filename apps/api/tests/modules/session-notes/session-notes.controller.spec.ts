@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { Test } from '@nestjs/testing';
+import { BadRequestException } from '@nestjs/common';
 import type { Request } from 'express';
 import { NoteStatus, UserRole } from '@prisma/client';
 import { SessionNotesController } from '../../../src/modules/session-notes/session-notes.controller';
@@ -113,6 +114,43 @@ describe('SessionNotesController', () => {
         UserRole.THERAPIST,
         expect.objectContaining({ page: 1, limit: 20 }),
       );
+    });
+
+    /**
+     * Express query params arrive as strings, always. Passing them through
+     * untouched sent `take: "50"` into Prisma and produced a 500
+     * (PrismaClientValidationError: Expected Int, provided String).
+     */
+    it('coerces string page/limit into numbers', async () => {
+      await controller.list(
+        { page: '2', limit: '50' },
+        makeReq() as unknown as Request & { user: typeof mockUser },
+      );
+      expect(service.listNotes).toHaveBeenCalledWith(
+        expect.any(Object),
+        therapistId,
+        UserRole.THERAPIST,
+        { page: 2, limit: 50 },
+      );
+    });
+
+    it('rejects a limit above the shared MAX_LIMIT instead of querying unbounded', async () => {
+      await expect(
+        controller.list(
+          { limit: '5000' },
+          makeReq() as unknown as Request & { user: typeof mockUser },
+        ),
+      ).rejects.toThrow(BadRequestException);
+      expect(service.listNotes).not.toHaveBeenCalled();
+    });
+
+    it('rejects a non-numeric limit with 400 rather than a 500 from Prisma', async () => {
+      await expect(
+        controller.list(
+          { limit: 'abc' },
+          makeReq() as unknown as Request & { user: typeof mockUser },
+        ),
+      ).rejects.toThrow(BadRequestException);
     });
 
     it('passes clientId filter when provided', async () => {

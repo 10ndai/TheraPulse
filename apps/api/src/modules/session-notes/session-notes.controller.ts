@@ -1,4 +1,5 @@
 import { Body, Controller, Delete, Get, Param, Patch, Post, Query, Req } from '@nestjs/common';
+import { paginationQuerySchema } from '@therapulse/shared';
 import type { Request } from 'express';
 import type { SessionNote, SessionNoteVersion } from '@prisma/client';
 import type { PaginatedResult } from '@therapulse/shared';
@@ -6,16 +7,26 @@ import type { UserRole } from '@prisma/client';
 import type { AccessTokenPayload } from '../auth/auth.service';
 // eslint-disable-next-line @typescript-eslint/consistent-type-imports -- DI token, needed as value for reflect-metadata
 import { SessionNotesService } from './session-notes.service';
+import { ZodValidationPipe } from '../../common/pipes/zod-validation.pipe';
 import type { CreateNoteDto, UpdateNoteDto } from './session-notes.service';
 
 type AuthenticatedRequest = Request & { user: AccessTokenPayload };
 
 interface ListQuery {
-  page?: number;
-  limit?: number;
+  // Express query params are always strings at runtime; typing these as `number`
+  // let a raw string reach Prisma and blow up with `take: "50"`.
+  page?: number | string;
+  limit?: number | string;
   clientId?: string;
   status?: 'DRAFT' | 'FINALIZED';
 }
+
+/**
+ * Coerces + bounds page/limit via the shared schema (min 1, max MAX_LIMIT).
+ * Reused programmatically so invalid input yields the same 400 envelope the
+ * pipe produces everywhere else.
+ */
+const paginationPipe = new ZodValidationPipe(paginationQuerySchema);
 
 @Controller('session-notes')
 export class SessionNotesController {
@@ -38,8 +49,10 @@ export class SessionNotesController {
     @Req() req: AuthenticatedRequest,
   ): Promise<{ success: true; data: SessionNote[]; meta: PaginatedResult<SessionNote>['meta'] }> {
     const { sub: id, role } = req.user;
-    const page = query.page ?? 1;
-    const limit = query.limit ?? 20;
+    const { page, limit } = paginationPipe.transform({
+      page: query.page,
+      limit: query.limit,
+    }) as { page: number; limit: number };
     const filters = {
       ...(query.clientId ? { clientId: query.clientId } : {}),
       ...(query.status ? { status: query.status } : {}),
