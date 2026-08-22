@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { Test } from '@nestjs/testing';
+import { BadRequestException } from '@nestjs/common';
 import type { Request } from 'express';
 import { UserRole } from '@prisma/client';
 import { NotificationsController } from '../../../src/modules/notifications/notifications.controller';
@@ -67,6 +68,28 @@ describe('NotificationsController', () => {
         data: [mockNotification],
         meta: { total: 1, page: 1, limit: 20, totalPages: 1 },
       });
+    });
+
+    /** Express hands over strings; passing them through 500s inside Prisma. */
+    it('coerces string page/limit into numbers', async () => {
+      await controller.list(
+        { page: '2', limit: '50' },
+        makeReq() as unknown as Request & { user: typeof mockUser },
+      );
+      expect(service.listForRecipient).toHaveBeenCalledWith(recipientId, expect.any(Object), {
+        page: 2,
+        limit: 50,
+      });
+    });
+
+    it('rejects an over-max limit with 400 instead of querying unbounded', async () => {
+      await expect(
+        controller.list(
+          { limit: '5000' },
+          makeReq() as unknown as Request & { user: typeof mockUser },
+        ),
+      ).rejects.toThrow(BadRequestException);
+      expect(service.listForRecipient).not.toHaveBeenCalled();
     });
 
     it('filters to unread when unreadOnly query param is true', async () => {

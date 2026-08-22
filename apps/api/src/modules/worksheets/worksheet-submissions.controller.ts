@@ -2,9 +2,11 @@ import { Body, Controller, Get, Param, Post, Query, Req } from '@nestjs/common';
 import type { Request } from 'express';
 import type { UserRole, WorksheetSubmission } from '@prisma/client';
 import type { PaginatedResult } from '@therapulse/shared';
+import { paginationQuerySchema } from '@therapulse/shared';
 import type { AccessTokenPayload } from '../auth/auth.service';
 // eslint-disable-next-line @typescript-eslint/consistent-type-imports -- DI token, needed as value for reflect-metadata
 import { WorksheetSubmissionsService } from './worksheet-submissions.service';
+import { ZodValidationPipe } from '../../common/pipes/zod-validation.pipe';
 
 type AuthenticatedRequest = Request & { user: AccessTokenPayload };
 
@@ -15,10 +17,15 @@ interface SubmitDto {
 }
 
 interface ListQuery {
-  page?: number;
-  limit?: number;
+  // Express query params are always strings at runtime; typing these as
+  // `number` let a raw string reach Prisma (`take: "50"` -> 500).
+  page?: number | string;
+  limit?: number | string;
   assignmentId?: string;
 }
+
+/** Coerces + bounds page/limit via the shared schema (min 1, max MAX_LIMIT). */
+const paginationPipe = new ZodValidationPipe(paginationQuerySchema);
 
 @Controller('worksheet-submissions')
 export class WorksheetSubmissionsController {
@@ -45,8 +52,10 @@ export class WorksheetSubmissionsController {
     meta: PaginatedResult<WorksheetSubmission>['meta'];
   }> {
     const { sub: id, role } = req.user;
-    const page = query.page ?? 1;
-    const limit = query.limit ?? 20;
+    const { page, limit } = paginationPipe.transform({
+      page: query.page,
+      limit: query.limit,
+    }) as { page: number; limit: number };
     const filters = query.assignmentId ? { assignmentId: query.assignmentId } : {};
     const result = await this.service.listSubmissions(filters, id, role as UserRole, {
       page,
