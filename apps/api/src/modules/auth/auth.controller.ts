@@ -1,4 +1,4 @@
-import { Body, Controller, HttpCode, HttpStatus, Post, Req } from '@nestjs/common';
+import { Body, Controller, Get, HttpCode, HttpStatus, Post, Req } from '@nestjs/common';
 import { z } from 'zod';
 import type { Request } from 'express';
 import {
@@ -25,6 +25,7 @@ import type {
   TotpSetupResponseData,
   EnableTotpResponseData,
   AccessTokenPayload,
+  CurrentUserResponseData,
 } from './auth.service';
 import type { ApiSuccessResponse } from '@therapulse/shared';
 
@@ -50,6 +51,18 @@ type AuthenticatedRequest = Request & { user: AccessTokenPayload };
 @Controller('auth')
 export class AuthController {
   constructor(private readonly authService: AuthService) {}
+
+  /**
+   * GET /api/auth/me
+   * Returns the authenticated user. The web BFF proxies here so the access
+   * token stays in the httpOnly cookie and never reaches client-side JS.
+   */
+  @Get('me')
+  @HttpCode(HttpStatus.OK)
+  async me(@Req() req: AuthenticatedRequest): Promise<ApiSuccessResponse<CurrentUserResponseData>> {
+    const data = await this.authService.getCurrentUser(req.user.sub);
+    return { success: true, data };
+  }
 
   /**
    * POST /api/auth/register

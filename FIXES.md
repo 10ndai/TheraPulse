@@ -287,6 +287,83 @@ seeded directory data (`HTTP 200`), and `/`, `/auth/login`, `/directory` all ren
 
 ---
 
+## 10. Pagination params reached Prisma as strings — three live 500s
+
+`session-notes`, `notifications`, `worksheet-submissions` controllers
+
+Clicking through the running app produced:
+
+```
+GET /api/session-notes?clientId=…&limit=50 → 500
+PrismaClientValidationError:
+  take: "50"
+  Argument `take`: Invalid value provided. Expected Int, provided String.
+```
+
+Express query params are **always strings**. All three controllers declared
+`page?: number; limit?: number` and passed the value straight through
+(`query.limit ?? 20`), so the raw string landed in Prisma's `take`.
+
+The reason no test caught it is worth recording: the existing specs called
+`controller.list({ page: 1, limit: 20 })` — passing **numbers**, a shape the
+framework can never actually produce. The tests agreed with the type annotation
+rather than with runtime.
+
+**Fix:** all three now parse through the shared `paginationQuerySchema`
+(`z.coerce.number().int()`, min 1, max `MAX_LIMIT`) via `ZodValidationPipe`, and
+`ListQuery` types the fields `number | string` so the type stops lying. Invalid
+input now returns the standard 400 envelope instead of a 500, and an over-large
+limit can no longer trigger an unbounded query.
+
+A sweep of the remaining paginated controllers found the rest already safe:
+`admin`, `directory`, `therapist-clients`, `worksheet-templates` and
+`worksheet-assignments` coerce with `Number()`; `audit-logs` uses `parseInt` with
+honest `string` typing.
+
+New tests were verified to fail against the pre-fix source. Verified live:
+
+```
+GET /api/notifications?limit=50     → 200  {"meta":{"limit":50,…}}
+GET /api/notifications?limit=99999  → 400
+```
+
+---
+
+## 11. `GET /auth/me` did not exist — every session looked logged-out
+
+`apps/api/src/modules/auth/auth.controller.ts`, `auth.service.ts`
+
+The dev log showed `POST /api/auth/login 200` immediately followed by
+`GET /api/auth/me 404`. The web BFF route exists and forwards to
+`${API_URL}/auth/me`, and TP-020 records it as "proxies to NestJS" — but the
+NestJS endpoint was never built. The auth controller had only `register`,
+`login`, `refresh` and `totp/*`.
+
+Impact: `fetchCurrentUser()` in `auth-context.tsx` treats a non-OK response as
+`null` and swallows it, so `user` was `null` **app-wide even when logged in** —
+role-based navigation and every `useAuth().user` check behaved as though nobody
+had ever signed in.
+
+**Fix (TDD):** `AuthService.getCurrentUser()` resolves the user by id and strips
+`passwordHash` / `totpSecret` by destructuring, exactly as `register()` and
+`login()` already do, throwing `NotFoundException` if the record is gone. The
+controller exposes `@Get('me')`, deliberately **not** `@Public()`, so the global
+`JwtAuthGuard` still applies. The id comes from the verified token subject
+(`req.user.sub`), never from client input, so a caller can only read their own
+record.
+
+Verified live through the BFF with a real cookie session:
+
+```
+POST /api/auth/login            → 200  (access_token + refresh_token cookies set)
+GET  /api/auth/me (with cookie) → 200  {"id":…,"email":"client1@therapulse.dev","role":"CLIENT"}
+GET  /api/auth/me (anonymous)   → 401
+```
+
+No `passwordHash` or `totpSecret` in the response.
+
+---
+
 ## Known issues (not fixed, nothing is blocked)
 
 1. **234 type errors in test files** — `apps/api` 194, `apps/web` 40; `packages/shared` is

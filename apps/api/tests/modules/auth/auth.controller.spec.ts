@@ -56,6 +56,7 @@ describe('AuthController', () => {
     register: ReturnType<typeof vi.fn>;
     login: ReturnType<typeof vi.fn>;
     refreshTokens: ReturnType<typeof vi.fn>;
+    getCurrentUser: ReturnType<typeof vi.fn>;
   };
 
   beforeEach(async () => {
@@ -64,6 +65,7 @@ describe('AuthController', () => {
       register: vi.fn(),
       login: vi.fn(),
       refreshTokens: vi.fn(),
+      getCurrentUser: vi.fn(),
     };
 
     const module = await Test.createTestingModule({
@@ -361,6 +363,38 @@ describe('AuthController', () => {
         AuthController.prototype.register as object,
       );
       expect(metadata).toBe(HttpStatus.CREATED);
+    });
+  });
+
+  // ── GET /auth/me ───────────────────────────────────────────────────────────
+
+  describe('GET /auth/me', () => {
+    const currentUser = {
+      id: '00000000-0000-0000-0000-000000000001',
+      email: 'therapist@example.com',
+      role: 'THERAPIST',
+      status: 'ACTIVE',
+      totpEnabled: false,
+      createdAt: new Date('2026-01-01'),
+      updatedAt: new Date('2026-01-01'),
+    };
+
+    it('returns the authenticated user in the success envelope', async () => {
+      mockAuthService.getCurrentUser.mockResolvedValue(currentUser);
+
+      const req = makeRequest({ user: { sub: currentUser.id, role: 'THERAPIST' } });
+      const result = await controller.me(req as never);
+
+      expect(result).toEqual({ success: true, data: currentUser });
+    });
+
+    it('resolves the user from the token subject, never from client input', async () => {
+      mockAuthService.getCurrentUser.mockResolvedValue(currentUser);
+
+      const req = makeRequest({ user: { sub: currentUser.id, role: 'THERAPIST' } });
+      await controller.me(req as never);
+
+      expect(mockAuthService.getCurrentUser).toHaveBeenCalledWith(currentUser.id);
     });
   });
 });

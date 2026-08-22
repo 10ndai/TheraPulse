@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { Test } from '@nestjs/testing';
-import { ConflictException } from '@nestjs/common';
+import { ConflictException, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import { UserRole, UserStatus } from '@prisma/client';
@@ -34,13 +34,17 @@ const mockMeta = { ipAddress: '127.0.0.1', userAgent: 'TestAgent/1.0' };
 
 describe('AuthService', () => {
   let service: AuthService;
-  let mockUserRepo: { findByEmail: ReturnType<typeof vi.fn>; create: ReturnType<typeof vi.fn> };
+  let mockUserRepo: {
+    findByEmail: ReturnType<typeof vi.fn>;
+    create: ReturnType<typeof vi.fn>;
+    findById: ReturnType<typeof vi.fn>;
+  };
   let mockAuditRepo: { create: ReturnType<typeof vi.fn> };
 
   beforeEach(async () => {
     vi.clearAllMocks();
 
-    mockUserRepo = { findByEmail: vi.fn(), create: vi.fn() };
+    mockUserRepo = { findByEmail: vi.fn(), create: vi.fn(), findById: vi.fn() };
     mockAuditRepo = { create: vi.fn().mockResolvedValue({}) };
 
     vi.mocked(bcrypt.hash).mockResolvedValue('$2b$12$hashedpassword' as never);
@@ -246,6 +250,32 @@ describe('AuthService', () => {
       ).rejects.toThrow();
 
       expect(mockAuditRepo.create).not.toHaveBeenCalled();
+    });
+  });
+
+  // ── getCurrentUser() ──────────────────────────────────────────────────────
+
+  describe('getCurrentUser()', () => {
+    it('returns the user without passwordHash or totpSecret', async () => {
+      mockUserRepo.findById.mockResolvedValue({
+        ...mockUser,
+        totpSecret: 'ENCRYPTED_TOTP_SECRET',
+      });
+
+      const result = await service.getCurrentUser(mockUser.id);
+
+      expect(mockUserRepo.findById).toHaveBeenCalledWith(mockUser.id);
+      expect(result).not.toHaveProperty('passwordHash');
+      expect(result).not.toHaveProperty('totpSecret');
+      expect(result.id).toBe(mockUser.id);
+      expect(result.email).toBe(mockUser.email);
+      expect(result.role).toBe(mockUser.role);
+    });
+
+    it('throws NotFoundException when the user no longer exists', async () => {
+      mockUserRepo.findById.mockResolvedValue(null);
+
+      await expect(service.getCurrentUser(mockUser.id)).rejects.toThrow(NotFoundException);
     });
   });
 });

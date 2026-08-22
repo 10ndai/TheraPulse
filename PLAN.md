@@ -277,6 +277,33 @@ Full write-up: **`FIXES.md`**. Summary of what was broken:
   excluded the TP-024 RLS policies — a fresh deploy would have had no row-level
   security. Now tracked.
 
+### 2026-08-22 — Runtime bugs found by running the app
+
+Static gates being green turned out not to mean the app worked. Actually starting
+`npm run dev` and exercising it surfaced four defects that the 1377-test suite did
+not catch (details in `FIXES.md` §9–§11):
+
+- **`GET /api/health` returned 401** — missing `@Public()` under the global
+  `JwtAuthGuard`. Both Dockerfile HEALTHCHECKs and the post-deploy gate in
+  `deploy.yml` require an unauthenticated 200, so containers would have been
+  restart-looped and deploys would have failed.
+- **Three endpoints 500'd on any `limit` param** — `session-notes`,
+  `notifications` and `worksheet-submissions` typed `page`/`limit` as `number` and
+  handed Express's raw strings to Prisma (`take: "50"`). Existing tests passed
+  numbers directly, a shape the framework never produces, so the bug was invisible.
+  All three now go through the shared `paginationQuerySchema`.
+- **`GET /auth/me` was never implemented** on the API, though TP-020 records the
+  BFF route as proxying to it. `auth-context` swallowed the 404 and left `user`
+  null app-wide, so the UI treated every session as logged-out. Implemented TDD and
+  verified live through a real cookie session.
+
+Lesson recorded for later phases: the unit suites assert against hand-written
+mocks that match the _type annotations_, not the runtime shapes the framework
+actually delivers. Contract or integration coverage on the HTTP boundary would
+have caught all four.
+
+API suite now 842 passing.
+
 Carried forward (blocking nothing, see `FIXES.md` → Known issues): 234 type errors
 confined to test files (strict flags vs. partial mocks), 10 HIGH npm advisories with
 non-major fixes available, and the deprecated `package.json#prisma` key.

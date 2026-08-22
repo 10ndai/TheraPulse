@@ -3,6 +3,7 @@ import {
   ConflictException,
   Inject,
   Injectable,
+  NotFoundException,
   UnauthorizedException,
 } from '@nestjs/common';
 // eslint-disable-next-line @typescript-eslint/consistent-type-imports -- DI token, needed as value for reflect-metadata
@@ -34,6 +35,9 @@ export interface RequestMeta {
 
 /** Safe user data returned after registration or login — no credentials. */
 export type RegisterResponseData = Omit<User, 'passwordHash' | 'totpSecret'>;
+
+/** The authenticated user, secrets stripped — same shape register and login return. */
+export type CurrentUserResponseData = RegisterResponseData;
 
 /** Accepted role values for public registration (ADMIN excluded). */
 export type PublicRole = 'THERAPIST' | 'CLIENT';
@@ -145,6 +149,24 @@ export class AuthService {
       userAgent: meta.userAgent,
     });
 
+    const { passwordHash: _ph, totpSecret: _ts, ...safeUser } = user;
+    return safeUser;
+  }
+
+  // ── getCurrentUser() ──────────────────────────────────────────────────────
+
+  /**
+   * Resolves the authenticated user for GET /auth/me.
+   *
+   * The id comes from the verified access-token subject, never from client
+   * input, so a caller can only ever read their own record. Secrets are
+   * stripped the same way register() and login() do.
+   */
+  async getCurrentUser(userId: string): Promise<CurrentUserResponseData> {
+    const user = await this.userRepo.findById(userId);
+    if (!user) {
+      throw new NotFoundException('User not found');
+    }
     const { passwordHash: _ph, totpSecret: _ts, ...safeUser } = user;
     return safeUser;
   }
