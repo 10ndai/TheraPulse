@@ -45,3 +45,7 @@ npm-debug.log*
 # NOTE: migrations are intentionally version-controlled (see CLAUDE.md — every
 # schema change requires a committed migration, and RLS policies live here).
 
+.claude/
+CLAUDE.md
+PLAN.md
+FIXES.md
